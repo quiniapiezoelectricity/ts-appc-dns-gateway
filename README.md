@@ -1,0 +1,158 @@
+# Tailscale App Connector DNS Gateway
+
+A Tailscale App Connector that actually works as a domain-based router.
+
+## The Problem
+
+Tailscale markets App Connectors as domain-based routing — configure a domain, and traffic to it exits through your connector node. In practice, the implementation is an IP-based router with a DNS discovery layer on top: the connector watches DNS responses for your configured domains, collects the IPs that come back, and routes those IPs through itself.
+
+This breaks in the real world because **CDN and SaaS IPs are shared**. When `your-app.example.com` resolves to `104.x.x.x`, that same IP is serving thousands of other customers on the same CDN. Tailscale has no way to route `your-app.example.com` through the connector without also capturing unintended traffic to that shared IP — or Tailscale may skip it entirely because the IP is considered "publicly reachable." The same problem applies to any large network that doesn't assign dedicated IPs per domain.
+
+The abstraction leaks. What you get is either over-routing (catching unintended traffic on shared IPs) or under-routing (missing traffic when IPs rotate before the connector re-observes DNS).
+
+## How This Fixes It
+
+This project implements what App Connector claims to be at a conceptual level: a true domain-based router.
+
+It pairs two containers in a shared network namespace:
+
+- **`appc-gateway`** runs [Xray](https://github.com/XTLS/Xray-core) as the DNS and traffic gateway. Every domain resolved through it gets assigned a unique virtual IP from a private pool you own (default: `10.250.0.0/16`). The gateway maintains the domain-to-virtual-IP mapping, and when traffic arrives for a virtual IP it looks up the original domain and opens a real connection to the actual destination.
+
+- **`appc-ts`** runs Tailscale as an App Connector in the same network namespace. It advertises the entire virtual IP CIDR as a route to your tailnet.
+
+Traffic flow:
+1. A tailnet client resolves `example.com`. Tailscale delivers the DNS query to the connector node via the peer API.
+2. The connector node queries the gateway for DNS. The gateway assigns `example.com` a stable virtual IP (e.g. `10.250.0.1`) and returns it.
+3. The client connects to `10.250.0.1`. The connector node advertises the entire virtual IP range as a subnet route, so Tailscale forwards the traffic through it.
+4. The gateway receives the packet on its TUN interface, maps the virtual IP back to `example.com`, connects to the real destination, and proxies the traffic.
+
+Because every domain gets its own unique virtual IP that belongs to nobody else, routing decisions are genuinely per-domain. The IP routing substrate is used as a transport mechanism, not as the routing logic itself.
+
+Tailscale's own domains are excluded from virtual IP mapping and resolved via real DNS — otherwise the tunnel itself would break.
+
+## Prerequisites
+
+- Docker with Compose
+- A Tailscale account with App Connectors enabled
+- A way to authenticate: an auth key, OAuth credentials, or an interactive login (see `.env.example`)
+
+## Quick Start
+
+```sh
+git clone https://github.com/quiniapiezoelectricity/ts-appc-dns-gateway.git
+cd ts-appc-dns-gateway
+docker compose up -d
+```
+
+Watch the Tailscale container logs for an authentication URL:
+
+```sh
+docker logs appc-ts
+```
+
+Open the URL in a browser to authorise the node. Once authenticated, complete the Tailscale ACL setup below.
+
+For non-interactive deployments (CI, unattended servers), set `TS_AUTHKEY` or OAuth credentials in a `.env` file instead — see `.env.example` for all options.
+
+## Tailscale ACL Setup
+
+### 1. Tag the node
+
+Assign a tag to the auth key used for `TS_AUTHKEY` so the connector can be referenced in policy:
+
+```json
+"tagOwners": {
+  "tag:appc": ["autogroup:admin"]
+}
+```
+
+### 2. Auto-approve the route
+
+Without auto-approval, the advertised virtual IP subnet sits pending in the admin console. Add an `autoApprovers` entry so the route is accepted automatically when the connector comes up:
+
+```json
+"autoApprovers": {
+  "routes": {
+    "10.250.0.0/16": ["tag:appc"]
+  }
+}
+```
+
+The range here can be a supernet covering multiple connectors (e.g. `10.248.0.0/13`) if you're running more than one gateway and want to avoid updating the ACL for each.
+
+### 3. Grant DNS access
+
+Clients need to be able to send DNS queries to the connector node. Without this, the peer API call for DNS resolution will be blocked:
+
+```json
+"grants": [
+  {
+    "src": ["autogroup:member"],
+    "dst": ["tag:appc"],
+    "ip": ["tcp:53", "udp:53"]
+  }
+]
+```
+
+### 4. Grant traffic via the connector
+
+This tells Tailscale to route traffic destined for the virtual IP pool through the connector node. The `dst` must be the virtual IP CIDR explicitly — `autogroup:internet` only covers public IPs, and the virtual IP pool is a private range that falls entirely outside it:
+
+```json
+"grants": [
+  {
+    "src": ["autogroup:member"],
+    "dst": ["10.250.0.0/16"],
+    "via": ["tag:appc"]
+  }
+]
+```
+
+Same as above, `dst` can be a supernet if you're running multiple gateways. Update it to match your `PRIVATEIP_CIDR` if using exact ranges.
+
+## Choosing a CIDR
+
+**Every gateway on the same tailnet must have a unique, non-overlapping `PRIVATEIP_CIDR`.** Each gateway maintains its own independent virtual IP mapping table. If two gateways share the same CIDR, Tailscale will route connections to whichever gateway wins the subnet route — which may not be the one that answered the DNS query. That gateway has no record of the virtual IP and the connection silently fails. This is the kind of breakage that produces no useful error message.
+
+**Minimum size**: Each resolved domain occupies one address in the pool for as long as the mapping is active. Wildcard domains and subdomains each count separately. A `/20` (4095 addresses) is the practical minimum for real use — `/24` works but fills up quickly with any wildcard usage. The default `/16` (65535 addresses, capped by the gateway) is a safe starting point with little reason to go smaller.
+
+**Avoid conflicts with your network**: If any device on your LAN or tailnet already uses part of the CIDR you pick, traffic to those real addresses gets silently captured by the gateway instead. Common ranges to watch out for:
+
+| Range | Commonly used by |
+|---|---|
+| `192.168.0.0/16` | Home routers, most consumer LAN defaults |
+| `10.0.0.0/8` | Corporate networks, VMs, containers |
+| `172.16.0.0/12` | Docker default bridge networks, some corporate nets |
+| `100.64.0.0/10` | Tailscale itself — never use this |
+
+The default `10.250.0.0/16` is chosen to avoid common allocations, but verify against your own LAN and any existing tailnet subnet routes before deploying.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `TS_AUTHKEY` | — | Tailscale auth key. One of `TS_AUTHKEY`, OAuth credentials, or interactive auth (see `.env.example`) is required. |
+| `TS_CLIENT_ID` | — | OAuth client ID. Alternative to `TS_AUTHKEY`. |
+| `TS_CLIENT_SECRET` | — | OAuth client secret. Alternative to `TS_AUTHKEY`. |
+| `TS_HOSTNAME` | — | Hostname for this node as it appears in the tailnet. |
+| `PRIVATEIP_CIDR` | `10.250.0.0/16` | Private CIDR for the virtual IP pool. Must be RFC1918 and must not overlap with real routes in your tailnet. |
+| `PRIVATEIP_POOLSIZE` | auto | Max number of concurrent virtual IP mappings. Defaults to the usable capacity of the CIDR, capped at 65535. |
+| `TUN_IF` | `gateway0` | Name of the TUN interface created by the gateway. |
+| `GATEWAY_VARIANT` | `default` | Which variant to run. Only `default` is recommended and supported. |
+| `TS_TAILSCALED_EXTRA_ARGS` | — | Extra arguments passed directly to `tailscaled`. |
+| `TS_ENABLE_HEALTH_CHECK` | `false` | Expose an unauthenticated `/healthz` endpoint for container health checks. |
+| `TS_ENABLE_METRICS` | `false` | Expose an unauthenticated `/metrics` endpoint for Prometheus scraping. |
+
+The `config/` directory holds the rendered Xray config at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
+
+## IPv4
+
+The default config is IPv4 only throughout — the virtual IP pool, DNS resolution, and internet egress are all IPv4. Dual-stack and IPv6-only are not supported out of the box, and Docker itself defaults to IPv4 networking, so there are several layers involved.
+
+The IP ranges of the two sides of the gateway (virtual IP pool and internet egress) are independent and can each be changed separately. The relevant knobs are `queryStrategy` and `domainStrategy` in the config template, and `PRIVATEIP_CIDR` for the pool. A `dualstack` variant exists that handles the kernel routing side if you want to explore IPv6 virtual IP pools — the config template is the remaining piece.
+
+## Variants
+
+### `default` (IPv4 only)
+
+The default and recommended variant. Set `GATEWAY_VARIANT=default` or omit the variable entirely.

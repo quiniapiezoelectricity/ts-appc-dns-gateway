@@ -1,0 +1,51 @@
+services:
+  appc-gateway:
+    image: teddysun/xray:latest
+    container_name: appc-gateway
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
+    volumes:
+      - ./config:/etc/config
+      - ./${GATEWAY_VARIANT:-default}/entrypoint.sh:/entrypoint.sh:ro
+      - ./${GATEWAY_VARIANT:-default}/config.template.json:/etc/template/config.template.json:ro
+    entrypoint: ["sh", "/entrypoint.sh"]
+    environment:
+      - PRIVATEIP_CIDR=${PRIVATEIP_CIDR:-10.250.0.0/16}
+      - PRIVATEIP_POOLSIZE=${PRIVATEIP_POOLSIZE:-}
+      - TUN_IF=${TUN_IF:-gateway0}
+    dns:
+      - 127.0.0.1
+  appc-ts:
+    image: tailscale/tailscale:latest
+    container_name: appc-ts
+    restart: unless-stopped
+    environment:
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_AUTH_ONCE=true
+      - TS_ACCEPT_DNS=false
+      - TS_EXTRA_ARGS=--advertise-connector --advertise-routes=${PRIVATEIP_CIDR:-10.250.0.0/16}
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=${TS_HOSTNAME}
+      - TS_LOG_TARGET=stdout
+      - TS_CLIENT_ID=${TS_CLIENT_ID:-}
+      - TS_CLIENT_SECRET=${TS_CLIENT_SECRET:-}
+      - TS_TAILSCALED_EXTRA_ARGS=${TS_TAILSCALED_EXTRA_ARGS:-}
+      - TS_ENABLE_HEALTH_CHECK=${TS_ENABLE_HEALTH_CHECK:-false}
+      - TS_ENABLE_METRICS=${TS_ENABLE_METRICS:-false}
+    volumes:
+      - ./state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - appc-gateway
+    network_mode: "container:appc-gateway"

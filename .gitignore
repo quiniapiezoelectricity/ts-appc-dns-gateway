@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime/generated artifacts
+state/
+config/*
+!config/.gitkeep
+*.log
+
+# Local editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
