@@ -1,4 +1,17 @@
 services:
+  appc-config:
+    image: alpine:latest
+    restart: "no"
+    entrypoint: sh
+    command: -c "apk add -q --no-cache jq && sh /render.sh"
+    volumes:
+      - ./config:/etc/config
+      - ./${GATEWAY_VARIANT:-default}/render.sh:/render.sh:ro
+      - ./${GATEWAY_VARIANT:-default}/config.template.json:/etc/template/config.template.json:ro
+    environment:
+      - PRIVATEIP_CIDR=${PRIVATEIP_CIDR:-10.250.0.0/16}
+      - TUN_IF=${TUN_IF:-gateway0}
+
   appc-gateway:
     image: teddysun/xray:latest
     container_name: appc-gateway
@@ -13,14 +26,16 @@ services:
     volumes:
       - ./config:/etc/config
       - ./${GATEWAY_VARIANT:-default}/entrypoint.sh:/entrypoint.sh:ro
-      - ./${GATEWAY_VARIANT:-default}/config.template.json:/etc/template/config.template.json:ro
     entrypoint: ["sh", "/entrypoint.sh"]
     environment:
       - PRIVATEIP_CIDR=${PRIVATEIP_CIDR:-10.250.0.0/16}
-      - PRIVATEIP_POOLSIZE=${PRIVATEIP_POOLSIZE:-}
       - TUN_IF=${TUN_IF:-gateway0}
     dns:
       - 127.0.0.1
+    depends_on:
+      appc-config:
+        condition: service_completed_successfully
+
   appc-ts:
     image: tailscale/tailscale:latest
     container_name: appc-ts

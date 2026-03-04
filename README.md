@@ -110,22 +110,43 @@ This tells Tailscale to route traffic destined for the virtual IP pool through t
 
 Same as above, `dst` can be a supernet if you're running multiple gateways. Update it to match your `PRIVATEIP_CIDR` if using exact ranges.
 
+For dual-stack setups, add an entry for each CIDR (or a supernet for each address family) in both `autoApprovers` and the via grant.
+
 ## Choosing a CIDR
 
 **Every gateway on the same tailnet must have a unique, non-overlapping `PRIVATEIP_CIDR`.** Each gateway maintains its own independent virtual IP mapping table. If two gateways share the same CIDR, Tailscale will route connections to whichever gateway wins the subnet route — which may not be the one that answered the DNS query. That gateway has no record of the virtual IP and the connection silently fails. This is the kind of breakage that produces no useful error message.
 
-**Minimum size**: Each resolved domain occupies one address in the pool for as long as the mapping is active. Wildcard domains and subdomains each count separately. A `/20` (4095 addresses) is the practical minimum for real use — `/24` works but fills up quickly with any wildcard usage. The default `/16` (65535 addresses, capped by the gateway) is a safe starting point with little reason to go smaller.
+Each resolved domain occupies one address in the pool for as long as the mapping is active. Wildcard domains and subdomains each count separately.
 
-**Avoid conflicts with your network**: If any device on your LAN or tailnet already uses part of the CIDR you pick, traffic to those real addresses gets silently captured by the gateway instead. Common ranges to watch out for:
+### IPv4
 
-| Range | Commonly used by |
+A `/20` (4095 addresses) is the practical minimum — `/24` fills up quickly with wildcard usage. The default `/16` (65535 addresses) is a safe starting point. If any device on your LAN or tailnet already uses part of the CIDR, traffic to those real addresses gets silently captured by the gateway instead.
+
+| Range | Avoid because |
 |---|---|
 | `192.168.0.0/16` | Home routers, most consumer LAN defaults |
 | `10.0.0.0/8` | Corporate networks, VMs, containers |
 | `172.16.0.0/12` | Docker default bridge networks, some corporate nets |
-| `100.64.0.0/10` | Tailscale itself — never use this |
+| `100.64.0.0/10` | Tailscale itself |
 
-The default `10.250.0.0/16` is chosen to avoid common allocations, but verify against your own LAN and any existing tailnet subnet routes before deploying.
+The default `10.250.0.0/16` is chosen to avoid common allocations, but verify against your own LAN and tailnet subnet routes before deploying.
+
+### IPv6
+
+Pick a **`/112` out of `2001:db8::/32`** (e.g. `2001:0db8:3333:4444:5555:6666:7777::/112`). The gateway caps pool size at 65535 regardless of CIDR, so a `/112` (65536 addresses) is the exact fit with no waste. The `2001:db8::/32` range is reserved exclusively for documentation and examples by [RFC 3849](https://datatracker.ietf.org/doc/html/rfc3849) — never routed on the real internet, cannot conflict with real addresses, and falls under Global Unicast so Chrome's [Private Network Access](https://developer.chrome.com/blog/private-network-access-update) restrictions do not apply.
+
+```env
+PRIVATEIP_CIDR=10.250.0.0/16,2001:0db8:3333:4444:5555:6666:7777::/112
+```
+
+The uniqueness requirement is the same as IPv4 — pick a different `/112` for each gateway on the same tailnet.
+
+| Range | Avoid because |
+|---|---|
+| `fc00::/7` (includes all `fd00::/8`) | ULA — Chrome v141+ blocks connections and shows a permission popup |
+| `fe80::/10` | Link-local — not routable |
+| `fd7a:115c:a1e0::/48` | Tailscale's own address range |
+| Any range in use on your LAN or tailnet | Silent capture problem, same as IPv4 |
 
 ## Configuration
 
@@ -135,24 +156,23 @@ The default `10.250.0.0/16` is chosen to avoid common allocations, but verify ag
 | `TS_CLIENT_ID` | — | OAuth client ID. Alternative to `TS_AUTHKEY`. |
 | `TS_CLIENT_SECRET` | — | OAuth client secret. Alternative to `TS_AUTHKEY`. |
 | `TS_HOSTNAME` | — | Hostname for this node as it appears in the tailnet. |
-| `PRIVATEIP_CIDR` | `10.250.0.0/16` | Private CIDR for the virtual IP pool. Must be RFC1918 and must not overlap with real routes in your tailnet. |
-| `PRIVATEIP_POOLSIZE` | auto | Max number of concurrent virtual IP mappings. Defaults to the usable capacity of the CIDR, capped at 65535. |
+| `PRIVATEIP_CIDR` | `10.250.0.0/16` | Virtual IP pool CIDR(s). Must be RFC1918, must not overlap with real routes in your tailnet. Comma-separate multiple CIDRs for dual-stack or multi-pool setups — strategy (`UseIPv4` / `UseIPv6` / `UseIP`) is auto-detected from the address families present. |
 | `TUN_IF` | `gateway0` | Name of the TUN interface created by the gateway. |
-| `GATEWAY_VARIANT` | `default` | Which variant to run. Only `default` is recommended and supported. |
+| `GATEWAY_VARIANT` | `default` | Variant directory to mount. Use `default` or create your own for custom configs. |
 | `TS_TAILSCALED_EXTRA_ARGS` | — | Extra arguments passed directly to `tailscaled`. |
 | `TS_ENABLE_HEALTH_CHECK` | `false` | Expose an unauthenticated `/healthz` endpoint for container health checks. |
 | `TS_ENABLE_METRICS` | `false` | Expose an unauthenticated `/metrics` endpoint for Prometheus scraping. |
 
 The `config/` directory holds the rendered Xray config at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
 
-## IPv4
+## Address families
 
-The default config is IPv4 only throughout — the virtual IP pool, DNS resolution, and internet egress are all IPv4. Dual-stack and IPv6-only are not supported out of the box, and Docker itself defaults to IPv4 networking, so there are several layers involved.
+The default `PRIVATEIP_CIDR` is IPv4, so out of the box DNS queries and internet egress are both IPv4. Docker also defaults to IPv4 networking.
 
-The IP ranges of the two sides of the gateway (virtual IP pool and internet egress) are independent and can each be changed separately. The relevant knobs are `queryStrategy` and `domainStrategy` in the config template, and `PRIVATEIP_CIDR` for the pool. A `dualstack` variant exists that handles the kernel routing side if you want to explore IPv6 virtual IP pools — the config template is the remaining piece.
+The virtual IP pool and the internet egress side are independent planes. Adding an IPv6 CIDR to `PRIVATEIP_CIDR` enables an IPv6 virtual pool — the gateway auto-detects the mix and sets `queryStrategy` / `domainStrategy` accordingly (`UseIPv4`, `UseIPv6`, or `UseIP` for dual-stack). The internet egress family follows the same strategy, so a dual-stack virtual pool also enables IPv6 outbound connections from the gateway to real destinations.
+
+Note that Docker IPv6 support requires explicit enablement in the Docker daemon config or compose network definition. The gateway's sysctls (`net.ipv6.conf.all.forwarding=1`) are already set.
 
 ## Variants
 
-### `default` (IPv4 only)
-
-The default and recommended variant. Set `GATEWAY_VARIANT=default` or omit the variable entirely.
+The `default` variant is the only built-in option. Set `GATEWAY_VARIANT=default` or omit the variable entirely. To use a custom config, create a directory alongside `default/` containing `entrypoint.sh`, `render.sh`, and `config.template.json`, then set `GATEWAY_VARIANT` to its name.

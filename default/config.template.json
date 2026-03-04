@@ -2,10 +2,7 @@
   "log": { "loglevel": "info" },
 
   "fakedns": [
-    {
-      "ipPool": "${PRIVATEIP_CIDR}",
-      "poolSize": ${PRIVATEIP_POOLSIZE}
-    }
+    { "ipPool": "10.250.0.0/16", "poolSize": 65535 }
   ],
 
   "dns": {
@@ -44,7 +41,7 @@
       "tag": "tun-in",
       "protocol": "tun",
       "settings": {
-        "name": "${TUN_IF}",
+        "name": "gateway0",
         "mtu": 1500,
         "userLevel": 0
       },
@@ -57,16 +54,16 @@
   ],
 
   "outbounds": [
-    { 
-        "protocol": "dns", 
-        "tag": "dns-out" 
+    {
+      "protocol": "dns",
+      "tag": "dns-out"
     },
-    { 
-        "protocol": "freedom", 
-        "tag": "direct", 
-        "settings": {
-            "domainStrategy": "UseIPv4"
-        }
+    {
+      "protocol": "freedom",
+      "tag": "direct",
+      "settings": {
+        "domainStrategy": "UseIPv4"
+      }
     }
   ],
 
