@@ -1,5 +1,5 @@
 {
-  "log": { "loglevel": "info" },
+  "log": { "loglevel": "warning" },
 
   "fakedns": [
     { "ipPool": "10.250.0.0/16", "poolSize": 65535 }
@@ -8,25 +8,9 @@
   "dns": {
     "queryStrategy": "UseIPv4",
     "servers": [
-      {
-        "address": "https+local://1.1.1.1/dns-query",
-        "domains": [
-          "geosite:tailscale"
-        ],
-        "skipFallback": true
-      },
-      {
-        "address": "https+local://1.0.0.1/dns-query",
-        "domains": [
-          "geosite:tailscale"
-        ],
-        "skipFallback": true
-      },
+      { "address": "127.0.0.1", "port": 5335, "domains": ["geosite:tailscale"], "skipFallback": true },
       "fakedns",
-      "https+local://1.1.1.1/dns-query",
-      "https+local://1.0.0.1/dns-query",
-      "1.1.1.1",
-      "1.0.0.1"
+      { "address": "127.0.0.1", "port": 5335 }
     ]
   },
 

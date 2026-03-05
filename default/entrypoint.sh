@@ -33,8 +33,16 @@ while [ -n "$REMAINING" ]; do
   CIDR="${REMAINING%%,*}"
   [ "$REMAINING" = "$CIDR" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
   case "${CIDR%/*}" in
-    *:*) ip -6 route replace "$CIDR" dev "$TUN_IF" ;;
-    *)   ip    route replace "$CIDR" dev "$TUN_IF" ;;
+    *:*)
+      EXISTING=$(ip -6 route show "$CIDR" 2>/dev/null)
+      [ -n "$EXISTING" ] && echo "[entrypoint] WARN: $CIDR overlaps with an existing route: $EXISTING" >&2
+      ip -6 route replace "$CIDR" dev "$TUN_IF"
+      ;;
+    *)
+      EXISTING=$(ip route show "$CIDR" 2>/dev/null)
+      [ -n "$EXISTING" ] && echo "[entrypoint] WARN: $CIDR overlaps with an existing route: $EXISTING" >&2
+      ip route replace "$CIDR" dev "$TUN_IF"
+      ;;
   esac
 done
 

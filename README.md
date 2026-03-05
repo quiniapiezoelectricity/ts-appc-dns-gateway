@@ -14,21 +14,21 @@ The abstraction leaks. What you get is either over-routing (catching unintended 
 
 This project implements what App Connector claims to be at a conceptual level: a true domain-based router.
 
-It pairs two containers in a shared network namespace:
+It pairs three containers in a shared network namespace:
 
 - **`appc-gateway`** runs [Xray](https://github.com/XTLS/Xray-core) as the DNS and traffic gateway. Every domain resolved through it gets assigned a unique virtual IP from a private pool you own (default: `10.250.0.0/16`). The gateway maintains the domain-to-virtual-IP mapping, and when traffic arrives for a virtual IP it looks up the original domain and opens a real connection to the actual destination.
+
+- **`appc-dns`** runs [dnsproxy](https://github.com/AdguardTeam/dnsproxy) as a DNS forwarder sidecar. Gateway forwards all non-FakeDNS queries to it on `127.0.0.1:5335`. dnsproxy resolves them against the configured upstreams (`DNS_UPSTREAM`) using its own bootstrap DNS — breaking the circular dependency that would otherwise occur if Gateway tried to resolve upstream hostnames through itself.
 
 - **`appc-ts`** runs Tailscale as an App Connector in the same network namespace. It advertises the entire virtual IP CIDR as a route to your tailnet.
 
 Traffic flow:
 1. A tailnet client resolves `example.com`. Tailscale delivers the DNS query to the connector node via the peer API.
-2. The connector node queries the gateway for DNS. The gateway assigns `example.com` a stable virtual IP (e.g. `10.250.0.1`) and returns it.
+2. The connector node queries the gateway for DNS. Gateway checks FakeDNS: if the domain has a mapping it returns the existing virtual IP; otherwise it assigns a new one (e.g. `10.250.0.1`). Tailscale's own domains are forwarded to dnsproxy directly and resolved to real IPs.
 3. The client connects to `10.250.0.1`. The connector node advertises the entire virtual IP range as a subnet route, so Tailscale forwards the traffic through it.
 4. The gateway receives the packet on its TUN interface, maps the virtual IP back to `example.com`, connects to the real destination, and proxies the traffic.
 
 Because every domain gets its own unique virtual IP that belongs to nobody else, routing decisions are genuinely per-domain. The IP routing substrate is used as a transport mechanism, not as the routing logic itself.
-
-Tailscale's own domains are excluded from virtual IP mapping and resolved via real DNS — otherwise the tunnel itself would break.
 
 ## Prerequisites
 
@@ -156,14 +156,19 @@ The uniqueness requirement is the same as IPv4 — pick a different `/112` for e
 | `TS_CLIENT_ID` | — | OAuth client ID. Alternative to `TS_AUTHKEY`. |
 | `TS_CLIENT_SECRET` | — | OAuth client secret. Alternative to `TS_AUTHKEY`. |
 | `TS_HOSTNAME` | — | Hostname for this node as it appears in the tailnet. |
-| `PRIVATEIP_CIDR` | `10.250.0.0/16` | Virtual IP pool CIDR(s). Must be RFC1918, must not overlap with real routes in your tailnet. Comma-separate multiple CIDRs for dual-stack or multi-pool setups — strategy (`UseIPv4` / `UseIPv6` / `UseIP`) is auto-detected from the address families present. |
+| `PRIVATEIP_CIDR` | `10.250.0.0/16` | Virtual IP pool CIDR(s). Must not overlap with real routes in your tailnet. Comma-separate multiple CIDRs for dual-stack or multi-pool setups — strategy (`UseIPv4` / `UseIPv6` / `UseIP`) is auto-detected from the address families present. |
+| `DNS_UPSTREAM` | Cloudflare + Google DoH | Upstream DNS resolvers passed to dnsproxy, comma-separated. Accepts plain IPs (UDP/53), `udp://`, `tcp://` (plain DNS over TCP), `tls://` (DoT), `https://` (DoH), `h3://` (DoH over HTTP/3), `quic://` (DoQ), or `sdns://` (DNSCrypt stamps). Hostname-based DoH works — dnsproxy resolves server hostnames via `DNS_BOOTSTRAP`, independent of the gateway's DNS. |
+| `DNS_BOOTSTRAP` | Cloudflare + Google (IPv4 + IPv6) | Plain UDP resolvers (`ip:port`) used by dnsproxy to resolve upstream hostnames (e.g. the DoH server address). Bypasses the gateway's DNS entirely. Default covers two operators across both address families — override if any are blocked in your network. Not used when `DNS_UPSTREAM` contains only plain IPs. |
+| `DNSPROXY_CUSTOM` | — | If set to any non-empty value and `./config/dnsproxy.yaml` already exists, the config renderer leaves it untouched. Use this to persist hand-edited dnsproxy settings across restarts. If the file is missing it is still generated from `DNS_UPSTREAM` as a starting point. |
+| `GATEWAY_CUSTOM` | — | Same preserve-existing behaviour for `./config/config.json` (the rendered Gateway config). If set and the file exists, the renderer skips the `jq` render step. If the file is missing it is still rendered from the template. |
+| `LOGLEVEL` | `warning` | Log verbosity for the gateway and DNS sidecar. Gateway accepts `debug`, `info`, `warning`, `error`, and `none` — `info` logs every connection and DNS lookup. dnsproxy has no intermediate levels: only `debug` enables verbose output; all other values leave it quiet. For Tailscale verbosity, use `TS_TAILSCALED_EXTRA_ARGS=--verbose=1`. |
 | `TUN_IF` | `gateway0` | Name of the TUN interface created by the gateway. |
 | `GATEWAY_VARIANT` | `default` | Variant directory to mount. Use `default` or create your own for custom configs. |
 | `TS_TAILSCALED_EXTRA_ARGS` | — | Extra arguments passed directly to `tailscaled`. |
 | `TS_ENABLE_HEALTH_CHECK` | `false` | Expose an unauthenticated `/healthz` endpoint for container health checks. |
 | `TS_ENABLE_METRICS` | `false` | Expose an unauthenticated `/metrics` endpoint for Prometheus scraping. |
 
-The `config/` directory holds the rendered Xray config at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
+The `config/` directory holds the rendered Gateway config (`config.json`) and the generated dnsproxy config (`dnsproxy.yaml`) at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
 
 ## Address families
 

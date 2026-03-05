@@ -11,6 +11,11 @@ services:
     environment:
       - PRIVATEIP_CIDR=${PRIVATEIP_CIDR:-10.250.0.0/16}
       - TUN_IF=${TUN_IF:-gateway0}
+      - DNS_UPSTREAM=${DNS_UPSTREAM:-}
+      - DNS_BOOTSTRAP=${DNS_BOOTSTRAP:-}
+      - LOGLEVEL=${LOGLEVEL:-}
+      - DNSPROXY_CUSTOM=${DNSPROXY_CUSTOM:-}
+      - GATEWAY_CUSTOM=${GATEWAY_CUSTOM:-}
 
   appc-gateway:
     image: teddysun/xray:latest
@@ -35,6 +40,17 @@ services:
     depends_on:
       appc-config:
         condition: service_completed_successfully
+
+  appc-dns:
+    image: adguard/dnsproxy:latest
+    container_name: appc-dns
+    restart: unless-stopped
+    network_mode: "container:appc-gateway"
+    command: ["--config-path", "/etc/config/dnsproxy.yaml"]
+    volumes:
+      - ./config:/etc/config
+    depends_on:
+      - appc-gateway
 
   appc-ts:
     image: tailscale/tailscale:latest
@@ -63,4 +79,5 @@ services:
       - NET_RAW
     depends_on:
       - appc-gateway
+      - appc-dns
     network_mode: "container:appc-gateway"

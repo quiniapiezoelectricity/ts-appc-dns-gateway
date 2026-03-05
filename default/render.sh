@@ -3,6 +3,11 @@ set -e
 
 : "${PRIVATEIP_CIDR:=10.250.0.0/16}"
 : "${TUN_IF:=gateway0}"
+: "${DNS_UPSTREAM:=https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}"
+: "${DNS_BOOTSTRAP:=1.1.1.1:53,[2606:4700:4700::1111]:53,8.8.8.8:53,[2001:4860:4860::8888]:53}"
+: "${LOGLEVEL:=warning}"
+: "${DNSPROXY_CUSTOM:-}"
+: "${GATEWAY_CUSTOM:-}"
 
 TEMPLATE="/etc/template/config.template.json"
 CONFIG="/etc/config/config.json"
@@ -11,6 +16,8 @@ mkdir -p "$(dirname "$CONFIG")"
 die() { echo "[render] ERROR: $*" >&2; exit 1; }
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
+
+# --- FakeDNS pools + strategy ---
 
 HAS_IPV4=0
 HAS_IPV6=0
@@ -63,15 +70,72 @@ else
   STRATEGY="UseIPv4"
 fi
 
-[ -f "$TEMPLATE" ] || die "Template not found: $TEMPLATE"
+# --- dnsproxy config ---
 
-jq --argjson pools    "$POOLS"    \
-   --arg     strategy "$STRATEGY" \
-   --arg     tunif    "$TUN_IF"   \
-   '.fakedns = $pools |
-    .dns.queryStrategy = $strategy |
-    (.outbounds[] | select(.tag == "direct")).settings.domainStrategy = $strategy |
-    (.inbounds[]  | select(.protocol == "tun")).settings.name = $tunif' \
-   "$TEMPLATE" > "$CONFIG"
+DNSPROXY_CONFIG="/etc/config/dnsproxy.yaml"
 
-echo "[render] Config written: CIDRs=${PRIVATEIP_CIDR}, strategy=${STRATEGY}, TUN=${TUN_IF}"
+if [ -n "$DNSPROXY_CUSTOM" ] && [ -f "$DNSPROXY_CONFIG" ]; then
+  echo "[render] dnsproxy config: preserving existing (DNSPROXY_CUSTOM is set)"
+else
+  DNSPROXY_VERBOSE=false
+  [ "$LOGLEVEL" = "debug" ] && DNSPROXY_VERBOSE=true
+  printf 'listen-addrs:\n  - "127.0.0.1"\nlisten-ports:\n  - 5335\n' > "$DNSPROXY_CONFIG"
+  printf 'verbose: %s\ncache: true\ncache-optimistic: true\nupstream-mode: parallel\n' "$DNSPROXY_VERBOSE" >> "$DNSPROXY_CONFIG"
+
+  printf 'bootstrap:\n' >> "$DNSPROXY_CONFIG"
+  REMAINING="$DNS_BOOTSTRAP"
+  while [ -n "$REMAINING" ]; do
+    ENTRY="${REMAINING%%,*}"
+    [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
+    ENTRY=$(printf '%s' "$ENTRY" | tr -d ' \t')
+    [ -z "$ENTRY" ] && continue
+    printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+  done
+
+  printf 'fallback:\n' >> "$DNSPROXY_CONFIG"
+  REMAINING="$DNS_BOOTSTRAP"
+  while [ -n "$REMAINING" ]; do
+    ENTRY="${REMAINING%%,*}"
+    [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
+    ENTRY=$(printf '%s' "$ENTRY" | tr -d ' \t')
+    [ -z "$ENTRY" ] && continue
+    printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+  done
+
+  printf 'upstream:\n' >> "$DNSPROXY_CONFIG"
+
+  DNS_COUNT=0
+  REMAINING="$DNS_UPSTREAM"
+  while [ -n "$REMAINING" ]; do
+    ENTRY="${REMAINING%%,*}"
+    [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
+    ENTRY=$(printf '%s' "$ENTRY" | tr -d ' \t')
+    [ -z "$ENTRY" ] && continue
+    printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+    DNS_COUNT=$((DNS_COUNT + 1))
+  done
+
+  [ "$DNS_COUNT" -gt 0 ] || die "DNS_UPSTREAM produced no entries"
+  echo "[render] dnsproxy config written: ${DNS_COUNT} upstream(s)"
+fi
+
+# --- Render config ---
+
+if [ -n "$GATEWAY_CUSTOM" ] && [ -f "$CONFIG" ]; then
+  echo "[render] Gateway config: preserving existing (GATEWAY_CUSTOM is set)"
+else
+  [ -f "$TEMPLATE" ] || die "Template not found: $TEMPLATE"
+
+  jq --argjson pools    "$POOLS"    \
+     --arg     strategy "$STRATEGY" \
+     --arg     tunif    "$TUN_IF"   \
+     --arg     loglevel "$LOGLEVEL" \
+     '.fakedns = $pools |
+      .dns.queryStrategy = $strategy |
+      (.outbounds[] | select(.tag == "direct")).settings.domainStrategy = $strategy |
+      (.inbounds[]  | select(.protocol == "tun")).settings.name = $tunif |
+      .log.loglevel = $loglevel' \
+     "$TEMPLATE" > "$CONFIG"
+
+  echo "[render] Config written: CIDRs=${PRIVATEIP_CIDR}, strategy=${STRATEGY}, TUN=${TUN_IF}"
+fi
