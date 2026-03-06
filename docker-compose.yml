@@ -1,9 +1,12 @@
 services:
   appc-config:
-    image: alpine:latest
+    image: ${CONFIG_IMAGE:-alpine:3.22}
+    container_name: appc-config
     restart: "no"
+    security_opt:
+      - no-new-privileges:true
     entrypoint: sh
-    command: -c "apk add -q --no-cache jq && sh /render.sh"
+    command: -ceu "apk add -q --no-cache jq && sh /render.sh"
     volumes:
       - ./config:/etc/config
       - ./${GATEWAY_VARIANT:-default}/render.sh:/render.sh:ro
@@ -14,13 +17,17 @@ services:
       - DNS_UPSTREAM=${DNS_UPSTREAM:-}
       - DNS_BOOTSTRAP=${DNS_BOOTSTRAP:-}
       - LOGLEVEL=${LOGLEVEL:-}
+      - DOMAIN_STRATEGY=${DOMAIN_STRATEGY:-}
       - DNSPROXY_CUSTOM=${DNSPROXY_CUSTOM:-}
       - GATEWAY_CUSTOM=${GATEWAY_CUSTOM:-}
 
   appc-gateway:
-    image: teddysun/xray:latest
+    image: ${GATEWAY_IMAGE:-teddysun/xray:latest}
     container_name: appc-gateway
+    init: true
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     cap_add:
       - NET_ADMIN
     devices:
@@ -29,7 +36,7 @@ services:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
-      - ./config:/etc/config
+      - ./config:/etc/config:ro
       - ./${GATEWAY_VARIANT:-default}/entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["sh", "/entrypoint.sh"]
     environment:
@@ -40,30 +47,43 @@ services:
     depends_on:
       appc-config:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show ${TUN_IF:-gateway0} >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
 
   appc-dns:
-    image: adguard/dnsproxy:latest
+    image: ${DNS_IMAGE:-adguard/dnsproxy:latest}
     container_name: appc-dns
+    init: true
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     network_mode: "container:appc-gateway"
     command: ["--config-path", "/etc/config/dnsproxy.yaml"]
     volumes:
-      - ./config:/etc/config
+      - ./config:/etc/config:ro
     depends_on:
-      - appc-gateway
+      appc-gateway:
+        condition: service_healthy
 
   appc-ts:
-    image: tailscale/tailscale:latest
+    image: ${TS_IMAGE:-tailscale/tailscale:stable}
     container_name: appc-ts
+    init: true
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
       - TS_AUTH_ONCE=true
       - TS_ACCEPT_DNS=false
       - TS_EXTRA_ARGS=--advertise-connector --advertise-routes=${PRIVATEIP_CIDR:-10.250.0.0/16}
-      - TS_AUTHKEY=${TS_AUTHKEY}
-      - TS_HOSTNAME=${TS_HOSTNAME}
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=${TS_HOSTNAME:-}
       - TS_LOG_TARGET=stdout
       - TS_CLIENT_ID=${TS_CLIENT_ID:-}
       - TS_CLIENT_SECRET=${TS_CLIENT_SECRET:-}
@@ -78,6 +98,14 @@ services:
       - NET_ADMIN
       - NET_RAW
     depends_on:
-      - appc-gateway
-      - appc-dns
+      appc-gateway:
+        condition: service_healthy
+      appc-dns:
+        condition: service_started
     network_mode: "container:appc-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

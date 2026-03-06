@@ -1,5 +1,5 @@
 #!/bin/sh
-set -e
+set -eu
 
 : "${PRIVATEIP_CIDR:=10.250.0.0/16}"
 : "${TUN_IF:=gateway0}"
@@ -7,6 +7,7 @@ set -e
 CONFIG="/etc/config/config.json"
 
 die() { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
+trim_spaces() { printf '%s' "$1" | tr -d ' \t\r\n'; }
 
 command -v xray >/dev/null 2>&1 || die "xray not found"
 command -v ip   >/dev/null 2>&1 || die "ip not found"
@@ -17,11 +18,11 @@ xray -config "$CONFIG" &
 PID="$!"
 trap 'kill "$PID" 2>/dev/null || true' INT TERM EXIT
 
-# Wait for TUN interface to appear (created by xray)
+# Wait for TUN interface to appear (created by the gateway)
 i=0
 while [ "$i" -lt 12 ]; do
   ip link show "$TUN_IF" >/dev/null 2>&1 && break
-  kill -0 "$PID" 2>/dev/null || die "xray exited before TUN interface $TUN_IF appeared"
+  kill -0 "$PID" 2>/dev/null || die "gateway exited before TUN interface $TUN_IF appeared"
   i=$((i + 1))
   sleep 1
 done
@@ -32,6 +33,12 @@ REMAINING="$PRIVATEIP_CIDR"
 while [ -n "$REMAINING" ]; do
   CIDR="${REMAINING%%,*}"
   [ "$REMAINING" = "$CIDR" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
+  CIDR=$(trim_spaces "$CIDR")
+  [ -n "$CIDR" ] || die "Invalid PRIVATEIP_CIDR list: empty entry"
+  case "$CIDR" in
+    */*) ;;
+    *) die "Invalid CIDR (missing '/'): $CIDR" ;;
+  esac
   case "${CIDR%/*}" in
     *:*)
       EXISTING=$(ip -6 route show "$CIDR" 2>/dev/null)

@@ -1,21 +1,33 @@
 #!/bin/sh
-set -e
+set -eu
 
 : "${PRIVATEIP_CIDR:=10.250.0.0/16}"
 : "${TUN_IF:=gateway0}"
 : "${DNS_UPSTREAM:=https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}"
 : "${DNS_BOOTSTRAP:=1.1.1.1:53,[2606:4700:4700::1111]:53,8.8.8.8:53,[2001:4860:4860::8888]:53}"
 : "${LOGLEVEL:=warning}"
-: "${DNSPROXY_CUSTOM:-}"
-: "${GATEWAY_CUSTOM:-}"
+: "${DOMAIN_STRATEGY:=UseIP}"
+DNSPROXY_CUSTOM="${DNSPROXY_CUSTOM:-}"
+GATEWAY_CUSTOM="${GATEWAY_CUSTOM:-}"
 
 TEMPLATE="/etc/template/config.template.json"
 CONFIG="/etc/config/config.json"
 mkdir -p "$(dirname "$CONFIG")"
 
 die() { echo "[render] ERROR: $*" >&2; exit 1; }
+trim_spaces() { printf '%s' "$1" | tr -d ' \t\r\n'; }
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
+
+case "$LOGLEVEL" in
+  debug|info|warning|error|none) ;;
+  *) die "Invalid LOGLEVEL: $LOGLEVEL (expected debug|info|warning|error|none)" ;;
+esac
+
+case "$DOMAIN_STRATEGY" in
+  UseIP|UseIPv4|UseIPv6|UseIPv4v6|UseIPv6v4|ForceIP|ForceIPv4|ForceIPv6|ForceIPv4v6|ForceIPv6v4) ;;
+  *) die "Invalid DOMAIN_STRATEGY: $DOMAIN_STRATEGY (expected UseIP|UseIPv4|UseIPv6|UseIPv4v6|UseIPv6v4|ForceIP|ForceIPv4|ForceIPv6|ForceIPv4v6|ForceIPv6v4)" ;;
+esac
 
 # --- FakeDNS pools + strategy ---
 
@@ -27,6 +39,12 @@ REMAINING="$PRIVATEIP_CIDR"
 while [ -n "$REMAINING" ]; do
   CIDR="${REMAINING%%,*}"
   [ "$REMAINING" = "$CIDR" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
+  CIDR=$(trim_spaces "$CIDR")
+  [ -n "$CIDR" ] || die "Invalid PRIVATEIP_CIDR list: empty entry"
+  case "$CIDR" in
+    */*) ;;
+    *) die "Invalid CIDR (missing '/'): $CIDR" ;;
+  esac
 
   PREFIX="${CIDR#*/}"
   IP_ADDR="${CIDR%/*}"
@@ -41,8 +59,9 @@ while [ -n "$REMAINING" ]; do
     *)   HAS_IPV4=1; FAMILY_BITS=32  ;;
   esac
 
-  [ "$PREFIX" -ge 0 ] 2>/dev/null && [ "$PREFIX" -le "$FAMILY_BITS" ] 2>/dev/null \
-    || die "Prefix out of range for address family: $CIDR"
+  if ! { [ "$PREFIX" -ge 0 ] 2>/dev/null && [ "$PREFIX" -le "$FAMILY_BITS" ] 2>/dev/null; }; then
+    die "Prefix out of range for address family: $CIDR"
+  fi
 
   HOSTBITS=$((FAMILY_BITS - PREFIX))
   if [ "$HOSTBITS" -gt 16 ]; then
@@ -83,22 +102,25 @@ else
   printf 'verbose: %s\ncache: true\ncache-optimistic: true\nupstream-mode: parallel\n' "$DNSPROXY_VERBOSE" >> "$DNSPROXY_CONFIG"
 
   printf 'bootstrap:\n' >> "$DNSPROXY_CONFIG"
+  BOOTSTRAP_COUNT=0
   REMAINING="$DNS_BOOTSTRAP"
   while [ -n "$REMAINING" ]; do
     ENTRY="${REMAINING%%,*}"
     [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
-    ENTRY=$(printf '%s' "$ENTRY" | tr -d ' \t')
-    [ -z "$ENTRY" ] && continue
+    ENTRY=$(trim_spaces "$ENTRY")
+    [ -n "$ENTRY" ] || die "Invalid DNS_BOOTSTRAP list: empty entry"
     printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+    BOOTSTRAP_COUNT=$((BOOTSTRAP_COUNT + 1))
   done
+  [ "$BOOTSTRAP_COUNT" -gt 0 ] || die "DNS_BOOTSTRAP produced no entries"
 
   printf 'fallback:\n' >> "$DNSPROXY_CONFIG"
   REMAINING="$DNS_BOOTSTRAP"
   while [ -n "$REMAINING" ]; do
     ENTRY="${REMAINING%%,*}"
     [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
-    ENTRY=$(printf '%s' "$ENTRY" | tr -d ' \t')
-    [ -z "$ENTRY" ] && continue
+    ENTRY=$(trim_spaces "$ENTRY")
+    [ -n "$ENTRY" ] || die "Invalid DNS_BOOTSTRAP list: empty entry"
     printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
   done
 
@@ -109,8 +131,8 @@ else
   while [ -n "$REMAINING" ]; do
     ENTRY="${REMAINING%%,*}"
     [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
-    ENTRY=$(printf '%s' "$ENTRY" | tr -d ' \t')
-    [ -z "$ENTRY" ] && continue
+    ENTRY=$(trim_spaces "$ENTRY")
+    [ -n "$ENTRY" ] || die "Invalid DNS_UPSTREAM list: empty entry"
     printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
     DNS_COUNT=$((DNS_COUNT + 1))
   done
@@ -126,16 +148,17 @@ if [ -n "$GATEWAY_CUSTOM" ] && [ -f "$CONFIG" ]; then
 else
   [ -f "$TEMPLATE" ] || die "Template not found: $TEMPLATE"
 
-  jq --argjson pools    "$POOLS"    \
-     --arg     strategy "$STRATEGY" \
-     --arg     tunif    "$TUN_IF"   \
-     --arg     loglevel "$LOGLEVEL" \
+  jq --argjson pools      "$POOLS"           \
+     --arg     strategy   "$STRATEGY"        \
+     --arg     outstrat   "$DOMAIN_STRATEGY" \
+     --arg     tunif      "$TUN_IF"          \
+     --arg     loglevel   "$LOGLEVEL"        \
      '.fakedns = $pools |
       .dns.queryStrategy = $strategy |
-      (.outbounds[] | select(.tag == "direct")).settings.domainStrategy = $strategy |
+      (.outbounds[] | select(.tag == "direct")).settings.domainStrategy = $outstrat |
       (.inbounds[]  | select(.protocol == "tun")).settings.name = $tunif |
       .log.loglevel = $loglevel' \
      "$TEMPLATE" > "$CONFIG"
 
-  echo "[render] Config written: CIDRs=${PRIVATEIP_CIDR}, strategy=${STRATEGY}, TUN=${TUN_IF}"
+  echo "[render] Config written: CIDRs=${PRIVATEIP_CIDR}, queryStrategy=${STRATEGY}, domainStrategy=${DOMAIN_STRATEGY}, TUN=${TUN_IF}"
 fi

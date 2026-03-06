@@ -41,6 +41,8 @@ Because every domain gets its own unique virtual IP that belongs to nobody else,
 ```sh
 git clone https://github.com/quiniapiezoelectricity/ts-appc-dns-gateway.git
 cd ts-appc-dns-gateway
+cp .env.example .env
+# edit .env with at least TS_AUTHKEY or OAuth credentials
 docker compose up -d
 ```
 
@@ -53,6 +55,8 @@ docker logs appc-ts
 Open the URL in a browser to authorise the node. Once authenticated, complete the Tailscale ACL setup below.
 
 For non-interactive deployments (CI, unattended servers), set `TS_AUTHKEY` or OAuth credentials in a `.env` file instead — see `.env.example` for all options.
+
+For production deployments, pin container images to immutable tags or digests in `.env` (`CONFIG_IMAGE`, `GATEWAY_IMAGE`, `DNS_IMAGE`, `TS_IMAGE`) before rollout.
 
 ## Tailscale ACL Setup
 
@@ -156,11 +160,16 @@ The uniqueness requirement is the same as IPv4 — pick a different `/112` for e
 | `TS_CLIENT_ID` | — | OAuth client ID. Alternative to `TS_AUTHKEY`. |
 | `TS_CLIENT_SECRET` | — | OAuth client secret. Alternative to `TS_AUTHKEY`. |
 | `TS_HOSTNAME` | — | Hostname for this node as it appears in the tailnet. |
+| `CONFIG_IMAGE` | `alpine:3.22` | Image used by the config renderer sidecar. Pin this for reproducible builds. |
+| `GATEWAY_IMAGE` | `teddysun/xray:latest` | Gateway image. For production, replace `latest` with a fixed tag or digest. |
+| `DNS_IMAGE` | `adguard/dnsproxy:latest` | DNS sidecar image. For production, replace `latest` with a fixed tag or digest. |
+| `TS_IMAGE` | `tailscale/tailscale:stable` | Tailscale image. `stable` is safer than `latest`; pin to a fixed tag/digest for fully reproducible rollouts. |
 | `PRIVATEIP_CIDR` | `10.250.0.0/16` | Virtual IP pool CIDR(s). Must not overlap with real routes in your tailnet. Comma-separate multiple CIDRs for dual-stack or multi-pool setups — strategy (`UseIPv4` / `UseIPv6` / `UseIP`) is auto-detected from the address families present. |
 | `DNS_UPSTREAM` | Cloudflare + Google DoH | Upstream DNS resolvers passed to dnsproxy, comma-separated. Accepts plain IPs (UDP/53), `udp://`, `tcp://` (plain DNS over TCP), `tls://` (DoT), `https://` (DoH), `h3://` (DoH over HTTP/3), `quic://` (DoQ), or `sdns://` (DNSCrypt stamps). Hostname-based DoH works — dnsproxy resolves server hostnames via `DNS_BOOTSTRAP`, independent of the gateway's DNS. |
 | `DNS_BOOTSTRAP` | Cloudflare + Google (IPv4 + IPv6) | Plain UDP resolvers (`ip:port`) used by dnsproxy to resolve upstream hostnames (e.g. the DoH server address). Bypasses the gateway's DNS entirely. Default covers two operators across both address families — override if any are blocked in your network. Not used when `DNS_UPSTREAM` contains only plain IPs. |
 | `DNSPROXY_CUSTOM` | — | If set to any non-empty value and `./config/dnsproxy.yaml` already exists, the config renderer leaves it untouched. Use this to persist hand-edited dnsproxy settings across restarts. If the file is missing it is still generated from `DNS_UPSTREAM` as a starting point. |
 | `GATEWAY_CUSTOM` | — | Same preserve-existing behaviour for `./config/config.json` (the rendered Gateway config). If set and the file exists, the renderer skips the `jq` render step. If the file is missing it is still rendered from the template. |
+| `DOMAIN_STRATEGY` | `UseIP` | Outbound domain resolution strategy for the gateway. `UseIP` tries both address families and works on any host regardless of IPv4/IPv6 availability. Set to `UseIPv4` or `UseIPv6` to restrict outbound connections to a specific family. Accepts: `UseIP`, `UseIPv4`, `UseIPv6`, `UseIPv4v6`, `UseIPv6v4`, `ForceIP`, `ForceIPv4`, `ForceIPv6`, `ForceIPv4v6`, `ForceIPv6v4`. (`AsIs` is rejected — the container DNS points to the gateway itself, causing a routing loop.) Independent of `queryStrategy`, which is always auto-detected from `PRIVATEIP_CIDR`. |
 | `LOGLEVEL` | `warning` | Log verbosity for the gateway and DNS sidecar. Gateway accepts `debug`, `info`, `warning`, `error`, and `none` — `info` logs every connection and DNS lookup. dnsproxy has no intermediate levels: only `debug` enables verbose output; all other values leave it quiet. For Tailscale verbosity, use `TS_TAILSCALED_EXTRA_ARGS=--verbose=1`. |
 | `TUN_IF` | `gateway0` | Name of the TUN interface created by the gateway. |
 | `GATEWAY_VARIANT` | `default` | Variant directory to mount. Use `default` or create your own for custom configs. |
@@ -170,13 +179,21 @@ The uniqueness requirement is the same as IPv4 — pick a different `/112` for e
 
 The `config/` directory holds the rendered Gateway config (`config.json`) and the generated dnsproxy config (`dnsproxy.yaml`) at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
 
+## Operational hardening defaults
+
+- Containers run with `no-new-privileges`.
+- The runtime services (`appc-gateway`, `appc-dns`, `appc-ts`) use `init: true` for cleaner signal handling.
+- `appc-dns` and `appc-gateway` mount rendered config as read-only.
+- Startup health checks gate service ordering (`appc-config` -> `appc-gateway` -> `appc-dns`/`appc-ts`).
+- Config rendering is strict and fails fast on invalid `LOGLEVEL`, invalid `DOMAIN_STRATEGY`, malformed CIDR lists, or empty DNS list entries.
+
 ## Address families
 
 The default `PRIVATEIP_CIDR` is IPv4, so out of the box DNS queries and internet egress are both IPv4. Docker also defaults to IPv4 networking.
 
-The virtual IP pool and the internet egress side are independent planes. Adding an IPv6 CIDR to `PRIVATEIP_CIDR` enables an IPv6 virtual pool — the gateway auto-detects the mix and sets `queryStrategy` / `domainStrategy` accordingly (`UseIPv4`, `UseIPv6`, or `UseIP` for dual-stack). The internet egress family follows the same strategy, so a dual-stack virtual pool also enables IPv6 outbound connections from the gateway to real destinations.
+The virtual IP pool and the internet egress side are independent planes. Adding an IPv6 CIDR to `PRIVATEIP_CIDR` enables an IPv6 virtual pool — the gateway auto-detects the mix and sets `queryStrategy` accordingly (`UseIPv4`, `UseIPv6`, or `UseIP` for dual-stack). The outbound `domainStrategy` is controlled separately via `DOMAIN_STRATEGY` (default `UseIP`) and does not change with the pool — see the configuration table for details.
 
-Note that Docker IPv6 support requires explicit enablement in the Docker daemon config or compose network definition. The gateway's sysctls (`net.ipv6.conf.all.forwarding=1`) are already set.
+The virtual IP pool lives entirely on the TUN interface inside the container's network namespace — Docker network IPv6 does not need to be enabled. The gateway's sysctls (`net.ipv6.conf.all.forwarding=1`) are already set.
 
 ## Variants
 

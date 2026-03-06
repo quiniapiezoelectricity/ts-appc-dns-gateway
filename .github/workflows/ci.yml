@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck
+
+      - name: Validate shell syntax
+        run: |
+          sh -n default/render.sh
+          sh -n default/entrypoint.sh
+
+      - name: Shellcheck scripts
+        run: shellcheck default/render.sh default/entrypoint.sh
+
+      - name: Validate JSON template
+        run: jq -e . default/config.template.json >/dev/null
+
+      - name: Validate compose config
+        run: docker compose config >/tmp/compose.resolved.yaml
