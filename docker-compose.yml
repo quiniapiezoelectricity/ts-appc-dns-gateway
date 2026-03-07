@@ -10,7 +10,7 @@ services:
     volumes:
       - ./config:/etc/config
       - ./${GATEWAY_VARIANT:-default}/render.sh:/render.sh:ro
-      - ./${GATEWAY_VARIANT:-default}/config.template.json:/etc/template/config.template.json:ro
+      - ./${GATEWAY_VARIANT:-default}/gateway.template.json:/etc/template/gateway.template.json:ro
     environment:
       - PRIVATEIP_CIDR=${PRIVATEIP_CIDR:-10.250.0.0/16}
       - TUN_IF=${TUN_IF:-gateway0}
@@ -18,7 +18,7 @@ services:
       - DNS_BOOTSTRAP=${DNS_BOOTSTRAP:-}
       - LOGLEVEL=${LOGLEVEL:-}
       - DOMAIN_STRATEGY=${DOMAIN_STRATEGY:-}
-      - DNSPROXY_CUSTOM=${DNSPROXY_CUSTOM:-}
+      - DNS_CUSTOM=${DNS_CUSTOM:-}
       - GATEWAY_CUSTOM=${GATEWAY_CUSTOM:-}
 
   appc-gateway:
@@ -62,7 +62,7 @@ services:
     security_opt:
       - no-new-privileges:true
     network_mode: "container:appc-gateway"
-    command: ["--config-path", "/etc/config/dnsproxy.yaml"]
+    command: ["--config-path", "/etc/config/dns.yaml"]
     volumes:
       - ./config:/etc/config:ro
     depends_on:
@@ -109,3 +109,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+
+networks:
+  default:
+    enable_ipv6: true

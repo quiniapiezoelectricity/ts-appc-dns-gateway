@@ -6,12 +6,12 @@ set -eu
 : "${DNS_UPSTREAM:=https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}"
 : "${DNS_BOOTSTRAP:=1.1.1.1:53,[2606:4700:4700::1111]:53,8.8.8.8:53,[2001:4860:4860::8888]:53}"
 : "${LOGLEVEL:=warning}"
-: "${DOMAIN_STRATEGY:=UseIP}"
-DNSPROXY_CUSTOM="${DNSPROXY_CUSTOM:-}"
+: "${DOMAIN_STRATEGY:=UseIPv4}"
+DNS_CUSTOM="${DNS_CUSTOM:-}"
 GATEWAY_CUSTOM="${GATEWAY_CUSTOM:-}"
 
-TEMPLATE="/etc/template/config.template.json"
-CONFIG="/etc/config/config.json"
+TEMPLATE="/etc/template/gateway.template.json"
+CONFIG="/etc/config/gateway.json"
 mkdir -p "$(dirname "$CONFIG")"
 
 die() { echo "[render] ERROR: $*" >&2; exit 1; }
@@ -29,7 +29,7 @@ case "$DOMAIN_STRATEGY" in
   *) die "Invalid DOMAIN_STRATEGY: $DOMAIN_STRATEGY (expected UseIP|UseIPv4|UseIPv6|UseIPv4v6|UseIPv6v4|ForceIP|ForceIPv4|ForceIPv6|ForceIPv4v6|ForceIPv6v4)" ;;
 esac
 
-# --- FakeDNS pools + strategy ---
+# --- Virtual IP pools + query strategy ---
 
 HAS_IPV4=0
 HAS_IPV6=0
@@ -89,19 +89,19 @@ else
   STRATEGY="UseIPv4"
 fi
 
-# --- dnsproxy config ---
+# --- DNS sidecar config ---
 
-DNSPROXY_CONFIG="/etc/config/dnsproxy.yaml"
+DNS_CONFIG="/etc/config/dns.yaml"
 
-if [ -n "$DNSPROXY_CUSTOM" ] && [ -f "$DNSPROXY_CONFIG" ]; then
-  echo "[render] dnsproxy config: preserving existing (DNSPROXY_CUSTOM is set)"
+if [ -n "$DNS_CUSTOM" ] && [ -f "$DNS_CONFIG" ]; then
+  echo "[render] DNS config: preserving existing (DNS_CUSTOM is set)"
 else
-  DNSPROXY_VERBOSE=false
-  [ "$LOGLEVEL" = "debug" ] && DNSPROXY_VERBOSE=true
-  printf 'listen-addrs:\n  - "127.0.0.1"\nlisten-ports:\n  - 5335\n' > "$DNSPROXY_CONFIG"
-  printf 'verbose: %s\ncache: true\ncache-optimistic: true\nupstream-mode: parallel\n' "$DNSPROXY_VERBOSE" >> "$DNSPROXY_CONFIG"
+  DNS_VERBOSE=false
+  [ "$LOGLEVEL" = "debug" ] && DNS_VERBOSE=true
+  printf 'listen-addrs:\n  - "127.0.0.1"\nlisten-ports:\n  - 5335\n' > "$DNS_CONFIG"
+  printf 'verbose: %s\ncache: true\ncache-optimistic: true\nupstream-mode: parallel\n' "$DNS_VERBOSE" >> "$DNS_CONFIG"
 
-  printf 'bootstrap:\n' >> "$DNSPROXY_CONFIG"
+  printf 'bootstrap:\n' >> "$DNS_CONFIG"
   BOOTSTRAP_COUNT=0
   REMAINING="$DNS_BOOTSTRAP"
   while [ -n "$REMAINING" ]; do
@@ -109,22 +109,22 @@ else
     [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
     ENTRY=$(trim_spaces "$ENTRY")
     [ -n "$ENTRY" ] || die "Invalid DNS_BOOTSTRAP list: empty entry"
-    printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+    printf '  - "%s"\n' "$ENTRY" >> "$DNS_CONFIG"
     BOOTSTRAP_COUNT=$((BOOTSTRAP_COUNT + 1))
   done
   [ "$BOOTSTRAP_COUNT" -gt 0 ] || die "DNS_BOOTSTRAP produced no entries"
 
-  printf 'fallback:\n' >> "$DNSPROXY_CONFIG"
+  printf 'fallback:\n' >> "$DNS_CONFIG"
   REMAINING="$DNS_BOOTSTRAP"
   while [ -n "$REMAINING" ]; do
     ENTRY="${REMAINING%%,*}"
     [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
     ENTRY=$(trim_spaces "$ENTRY")
     [ -n "$ENTRY" ] || die "Invalid DNS_BOOTSTRAP list: empty entry"
-    printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+    printf '  - "%s"\n' "$ENTRY" >> "$DNS_CONFIG"
   done
 
-  printf 'upstream:\n' >> "$DNSPROXY_CONFIG"
+  printf 'upstream:\n' >> "$DNS_CONFIG"
 
   DNS_COUNT=0
   REMAINING="$DNS_UPSTREAM"
@@ -133,12 +133,12 @@ else
     [ "$REMAINING" = "$ENTRY" ] && REMAINING="" || REMAINING="${REMAINING#*,}"
     ENTRY=$(trim_spaces "$ENTRY")
     [ -n "$ENTRY" ] || die "Invalid DNS_UPSTREAM list: empty entry"
-    printf '  - "%s"\n' "$ENTRY" >> "$DNSPROXY_CONFIG"
+    printf '  - "%s"\n' "$ENTRY" >> "$DNS_CONFIG"
     DNS_COUNT=$((DNS_COUNT + 1))
   done
 
   [ "$DNS_COUNT" -gt 0 ] || die "DNS_UPSTREAM produced no entries"
-  echo "[render] dnsproxy config written: ${DNS_COUNT} upstream(s)"
+  echo "[render] DNS config written: ${DNS_COUNT} upstream(s)"
 fi
 
 # --- Render config ---

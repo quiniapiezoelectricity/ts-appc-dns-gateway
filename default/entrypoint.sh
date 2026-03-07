@@ -4,7 +4,7 @@ set -eu
 : "${PRIVATEIP_CIDR:=10.250.0.0/16}"
 : "${TUN_IF:=gateway0}"
 
-CONFIG="/etc/config/config.json"
+CONFIG="/etc/config/gateway.json"
 
 die() { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 trim_spaces() { printf '%s' "$1" | tr -d ' \t\r\n'; }
