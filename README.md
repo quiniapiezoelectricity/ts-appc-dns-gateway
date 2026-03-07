@@ -32,7 +32,7 @@ Because every domain gets its own unique virtual IP that belongs to nobody else,
 
 ## Prerequisites
 
-- Docker with Compose
+- Docker Engine 27+ with Compose
 - A Tailscale account with App Connectors enabled
 - A way to authenticate: an auth key, OAuth credentials, or an interactive login (see `.env.example`)
 
@@ -165,19 +165,19 @@ The uniqueness requirement is the same as IPv4 — pick a different `/112` for e
 | `DNS_IMAGE` | `adguard/dnsproxy:latest` | DNS sidecar image. For production, replace `latest` with a fixed tag or digest. |
 | `TS_IMAGE` | `tailscale/tailscale:stable` | Tailscale image. `stable` is safer than `latest`; pin to a fixed tag/digest for fully reproducible rollouts. |
 | `PRIVATEIP_CIDR` | `10.250.0.0/16` | Virtual IP pool CIDR(s). Must not overlap with real routes in your tailnet. Comma-separate multiple CIDRs for dual-stack or multi-pool setups — strategy (`UseIPv4` / `UseIPv6` / `UseIP`) is auto-detected from the address families present. |
-| `DNS_UPSTREAM` | Cloudflare + Google DoH | Upstream DNS resolvers passed to dnsproxy, comma-separated. Accepts plain IPs (UDP/53), `udp://`, `tcp://` (plain DNS over TCP), `tls://` (DoT), `https://` (DoH), `h3://` (DoH over HTTP/3), `quic://` (DoQ), or `sdns://` (DNSCrypt stamps). Hostname-based DoH works — dnsproxy resolves server hostnames via `DNS_BOOTSTRAP`, independent of the gateway's DNS. |
-| `DNS_BOOTSTRAP` | Cloudflare + Google (IPv4 + IPv6) | Plain UDP resolvers (`ip:port`) used by dnsproxy to resolve upstream hostnames (e.g. the DoH server address). Bypasses the gateway's DNS entirely. Default covers two operators across both address families — override if any are blocked in your network. Not used when `DNS_UPSTREAM` contains only plain IPs. |
-| `DNSPROXY_CUSTOM` | — | If set to any non-empty value and `./config/dnsproxy.yaml` already exists, the config renderer leaves it untouched. Use this to persist hand-edited dnsproxy settings across restarts. If the file is missing it is still generated from `DNS_UPSTREAM` as a starting point. |
-| `GATEWAY_CUSTOM` | — | Same preserve-existing behaviour for `./config/config.json` (the rendered Gateway config). If set and the file exists, the renderer skips the `jq` render step. If the file is missing it is still rendered from the template. |
-| `DOMAIN_STRATEGY` | `UseIP` | Outbound domain resolution strategy for the gateway. `UseIP` tries both address families and works on any host regardless of IPv4/IPv6 availability. Set to `UseIPv4` or `UseIPv6` to restrict outbound connections to a specific family. Accepts: `UseIP`, `UseIPv4`, `UseIPv6`, `UseIPv4v6`, `UseIPv6v4`, `ForceIP`, `ForceIPv4`, `ForceIPv6`, `ForceIPv4v6`, `ForceIPv6v4`. (`AsIs` is rejected — the container DNS points to the gateway itself, causing a routing loop.) Independent of `queryStrategy`, which is always auto-detected from `PRIVATEIP_CIDR`. |
-| `LOGLEVEL` | `warning` | Log verbosity for the gateway and DNS sidecar. Gateway accepts `debug`, `info`, `warning`, `error`, and `none` — `info` logs every connection and DNS lookup. dnsproxy has no intermediate levels: only `debug` enables verbose output; all other values leave it quiet. For Tailscale verbosity, use `TS_TAILSCALED_EXTRA_ARGS=--verbose=1`. |
+| `DNS_UPSTREAM` | Cloudflare + Google DoH | Upstream DNS resolvers passed to the DNS sidecar, comma-separated. Accepts plain IPs (UDP/53), `udp://`, `tcp://` (plain DNS over TCP), `tls://` (DoT), `https://` (DoH), `h3://` (DoH over HTTP/3), `quic://` (DoQ), or `sdns://` (DNSCrypt stamps). Hostname-based DoH works — the DNS sidecar resolves server hostnames via `DNS_BOOTSTRAP`, independent of the gateway's DNS. |
+| `DNS_BOOTSTRAP` | Cloudflare + Google (IPv4 + IPv6) | Plain UDP resolvers (`ip:port`) used by the DNS sidecar to resolve upstream hostnames (e.g. the DoH server address). Bypasses the gateway's DNS entirely. Default covers two operators across both address families — override if any are blocked in your network. Not used when `DNS_UPSTREAM` contains only plain IPs. |
+| `DNS_CUSTOM` | — | If set to any non-empty value and `./config/dns.yaml` already exists, the config renderer leaves it untouched. Use this to persist hand-edited DNS sidecar settings across restarts. If the file is missing it is still generated from `DNS_UPSTREAM` as a starting point. |
+| `GATEWAY_CUSTOM` | — | Same preserve-existing behaviour for `./config/gateway.json` (the rendered Gateway config). If set and the file exists, the renderer skips the `jq` render step. If the file is missing it is still rendered from the template. |
+| `DOMAIN_STRATEGY` | `UseIPv4` | Outbound domain resolution strategy for the gateway. The default matches the default IPv4-only pool — change this alongside `PRIVATEIP_CIDR`. The pool constrains what this can do; see the address families table. Accepts: `UseIP`, `UseIPv4`, `UseIPv6`, `UseIPv4v6`, `UseIPv6v4`, `ForceIP`, `ForceIPv4`, `ForceIPv6`, `ForceIPv4v6`, `ForceIPv6v4`. (`AsIs` is rejected — the container DNS points to the gateway itself, causing a routing loop.) |
+| `LOGLEVEL` | `warning` | Log verbosity for the gateway and DNS sidecar. Gateway accepts `debug`, `info`, `warning`, `error`, and `none` — `info` logs every connection and DNS lookup. The DNS sidecar has no intermediate levels: only `debug` enables verbose output; all other values leave it quiet. For Tailscale verbosity, use `TS_TAILSCALED_EXTRA_ARGS=--verbose=1`. |
 | `TUN_IF` | `gateway0` | Name of the TUN interface created by the gateway. |
 | `GATEWAY_VARIANT` | `default` | Variant directory to mount. Use `default` or create your own for custom configs. |
 | `TS_TAILSCALED_EXTRA_ARGS` | — | Extra arguments passed directly to `tailscaled`. |
 | `TS_ENABLE_HEALTH_CHECK` | `false` | Expose an unauthenticated `/healthz` endpoint for container health checks. |
 | `TS_ENABLE_METRICS` | `false` | Expose an unauthenticated `/metrics` endpoint for Prometheus scraping. |
 
-The `config/` directory holds the rendered Gateway config (`config.json`) and the generated dnsproxy config (`dnsproxy.yaml`) at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
+The `config/` directory holds the rendered gateway config (`gateway.json`) and the generated DNS sidecar config (`dns.yaml`) at runtime and is gitignored. The `state/` directory holds Tailscale state and is also gitignored — preserve it across restarts to avoid re-authentication.
 
 ## Operational hardening defaults
 
@@ -189,12 +189,26 @@ The `config/` directory holds the rendered Gateway config (`config.json`) and th
 
 ## Address families
 
-The default `PRIVATEIP_CIDR` is IPv4, so out of the box DNS queries and internet egress are both IPv4. Docker also defaults to IPv4 networking.
+Out of the box the stack is **IPv4-only**: the default `PRIVATEIP_CIDR` is an IPv4 range, the gateway only assigns IPv4 virtual IPs, and outbound connections to real destinations are IPv4.
 
-The virtual IP pool and the internet egress side are independent planes. Adding an IPv6 CIDR to `PRIVATEIP_CIDR` enables an IPv6 virtual pool — the gateway auto-detects the mix and sets `queryStrategy` accordingly (`UseIPv4`, `UseIPv6`, or `UseIP` for dual-stack). The outbound `domainStrategy` is controlled separately via `DOMAIN_STRATEGY` (default `UseIP`) and does not change with the pool — see the configuration table for details.
+There are two IPv6 planes:
 
-The virtual IP pool lives entirely on the TUN interface inside the container's network namespace — Docker network IPv6 does not need to be enabled. The gateway's sysctls (`net.ipv6.conf.all.forwarding=1`) are already set.
+**IPv6 virtual pool** — controlled by `PRIVATEIP_CIDR`. Adding an IPv6 CIDR (e.g. `2001:0db8::/112`) causes the gateway to assign IPv6 virtual IPs and return AAAA records to clients alongside IPv4. This lives on the TUN interface — no dependency on Docker networking or host IPv6 setup.
+
+**IPv6 egress** — whether the gateway connects to real destinations over IPv6. This uses the container's network interface and requires the host to have IPv6 internet connectivity. The compose file already has `enable_ipv6: true`; Docker Engine 27+ (the minimum requirement) allocates an IPv6 subnet automatically, with no daemon configuration needed.
+
+These two planes are coupled: the address families in `PRIVATEIP_CIDR` determine what the gateway's DNS resolves for outbound destination lookups. `DOMAIN_STRATEGY` can only further restrict egress within what the pool allows — it cannot expand it.
+
+| `PRIVATEIP_CIDR` | Host network | `DOMAIN_STRATEGY` | Gateway egress |
+|---|---|---|---|
+| IPv4 only *(default)* | any | any | IPv4 only — host IPv6 capability irrelevant |
+| IPv6 only | IPv4 only | any | ✗ fails — pool constrains DNS to IPv6, host has no IPv6 route |
+| IPv6 only | dual-stack | any | IPv6 only |
+| Dual-stack | dual-stack | `UseIPv4` *(default)* | IPv4 only |
+| Dual-stack | dual-stack | `UseIP` | Both |
+| Dual-stack | IPv4 only | `UseIPv4` *(default)* | IPv4 only |
+| Dual-stack | IPv4 only | `UseIP` | △ intermittent — random IPv6 attempts fail fast |
 
 ## Variants
 
-The `default` variant is the only built-in option. Set `GATEWAY_VARIANT=default` or omit the variable entirely. To use a custom config, create a directory alongside `default/` containing `entrypoint.sh`, `render.sh`, and `config.template.json`, then set `GATEWAY_VARIANT` to its name.
+The `default` variant is the only built-in option. Set `GATEWAY_VARIANT=default` or omit the variable entirely. To use a custom config, create a directory alongside `default/` containing `entrypoint.sh`, `render.sh`, and `gateway.template.json`, then set `GATEWAY_VARIANT` to its name.

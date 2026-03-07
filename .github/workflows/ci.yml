@@ -30,7 +30,7 @@ jobs:
         run: shellcheck default/render.sh default/entrypoint.sh
 
       - name: Validate JSON template
-        run: jq -e . default/config.template.json >/dev/null
+        run: jq -e . default/gateway.template.json >/dev/null
 
       - name: Validate compose config
         run: docker compose config >/tmp/compose.resolved.yaml
